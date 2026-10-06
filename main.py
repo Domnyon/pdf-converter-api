@@ -8,7 +8,6 @@ import uuid
 
 app = FastAPI()
 
-# السماح لموقعك بالتواصل مع السيرفر بحرية
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,7 +18,7 @@ app.add_middleware(
 
 @app.get("/")
 def home():
-    return {"status": "PDF Converter API is Running!"}
+    return {"status": "High-Precision PDF Converter API is Running!"}
 
 @app.post("/convert")
 async def convert_pdf_to_word(file: UploadFile = File(...)):
@@ -32,7 +31,18 @@ async def convert_pdf_to_word(file: UploadFile = File(...)):
 
     try:
         cv = Converter(pdf_path)
-        cv.convert(docx_path, start=0, end=None)
+
+        # ضبط المحرك المتقدم للحفاظ على المربعات، الأشكال، الرموز، والجداول
+        cv.convert(
+            docx_path,
+            start=0,
+            end=None,
+            multi_processing=True,
+            connected_components=True,     # اكتشاف ودمج الأشكال والمربعات الرسومية
+            extract_stream=True,           # استخراج الرموز والشعارات الرسومية Vector
+            parse_lattice_tables=True,    # قراءة الجداول ذات الحدود والمربعات بدقة
+            parse_stream_tables=True      # قراءة الجداول والقوائم غير المحددة بإطار
+        )
         cv.close()
 
         return FileResponse(
