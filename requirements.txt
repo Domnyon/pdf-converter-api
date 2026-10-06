@@ -1,8 +1,4 @@
 fastapi
 uvicorn
 python-multipart
-pdf2docx
-PyMuPDF
-arabic-reshaper
-python-bidi
-python-docx
+pdfservices-sdk
