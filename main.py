@@ -2,8 +2,6 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pdf2docx import Converter
-import arabic_reshaper
-from bidi.algorithm import get_display
 import os
 import shutil
 import uuid
@@ -20,7 +18,7 @@ app.add_middleware(
 
 @app.get("/")
 def home():
-    return {"status": "Arabic BiDi & Layout Enhanced PDF Engine Live!"}
+    return {"status": "Official Forms Precision Engine Live!"}
 
 @app.post("/convert")
 async def convert_pdf_to_word(file: UploadFile = File(...)):
@@ -34,19 +32,18 @@ async def convert_pdf_to_word(file: UploadFile = File(...)):
     try:
         cv = Converter(pdf_path)
 
-        # خيارات متقدمة لإجبار إنشاء مربعات نصية وحفظ الحدود والتنسيق الهندسي
+        # إعدادات خاصة بالنماذج وحقول الإدخال ومربعات الاختيار
         cv.convert(
             docx_path,
             start=0,
             end=None,
-            multi_processing=True,
-            connected_components=True,   # دمج ورسم المربعات النصية وحقول الإدخال
-            extract_stream=True,         # الحفاظ على الأشكال الهندسية والرموز
-            parse_lattice_tables=True,  # الحفاظ على إطارات الجداول والمربعات المغلقة
-            parse_stream_tables=True,   # كشف القوائم والترتيب غير المحدد بإطار
-            line_break_free=False,      # منع تدمير الأسطر لتفادي دمج نصوص المربعات المستقلة
-            margin_tolerance=0.05,      # دقة متناهية في التقاط المسافات وهوامش المربعات
-            text_direction_rtl=True     # ضبط اتجاه الكتابة من اليمين لليسار العربي
+            multi_processing=False,        # إيقاف التوازي لتفادي لخبطة ترتيب الحقول والنصوص المتجاورة
+            keep_shapes=True,              # الحفاظ على المربعات وحقول التحديد والأشكال الهندسية
+            connected_components=True,     # ربط الحقول والنصوص المحيطة بها
+            parse_lattice_tables=True,     # قراءة الجداول وإطارات النماذج
+            parse_stream_tables=True,      # كشف الحقول المصفوفة أفقياً وعمودياً
+            line_break_free=False,         # الحفاظ على فواصل الأسطر لمنع دمج العناوين مع التواقيع
+            margin_tolerance=0.01          # أعلى حساسية للمسافات وهوامش الحقول
         )
         cv.close()
 
