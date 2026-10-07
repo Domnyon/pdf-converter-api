@@ -3,4 +3,4 @@ uvicorn
 python-multipart
 requests
 python-docx
-pdfservices-sdk
+pdf2docx
