@@ -1,27 +1,17 @@
 import os
 import uuid
-import traceback
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
-
-# استيراد محرك Adobe بالطريقة الرسمية والمضمونة
-from adobe.pdfservices.operation.auth.service_principal_credentials import ServicePrincipalCredentials
-from adobe.pdfservices.operation.pdf_services import PDFServices
-from adobe.pdfservices.operation.pdf_services_media_type import PDFServicesMediaType
-from adobe.pdfservices.operation.pdfjobs.jobs.export_pdf_job import ExportPDFJob
-from adobe.pdfservices.operation.pdfjobs.params.export_pdf.export_pdf_params import ExportPDFParams
-from adobe.pdfservices.operation.pdfjobs.params.export_pdf.export_pdf_target_format import ExportPDFTargetFormat
-
-# مكتبة المعالجة المحلية كخطة بديلة
-from pdf2docx import Converter
-
+import time
+import requests
 import docx
 from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+from pdf2docx import Converter
 
 app = FastAPI(title="APDF Processing Engine")
 
@@ -38,18 +28,66 @@ app.add_middleware(
 async def root():
     return {"status": "ok", "message": "APDF API is active"}
 
-def get_adobe_services():
-    client_id = os.environ.get("PDF_SERVICES_CLIENT_ID")
-    client_secret = os.environ.get("PDF_SERVICES_CLIENT_SECRET")
-    
-    if not client_id or not client_secret:
-        raise ValueError("Missing Adobe credentials in Environment Variables")
-        
-    credentials = ServicePrincipalCredentials(
-        client_id=client_id.strip(),
-        client_secret=client_secret.strip()
-    )
-    return PDFServices(credentials=credentials)
+def get_adobe_access_token(client_id: str, client_secret: str) -> str:
+    """الحصول على توكن المصادقة من Adobe"""
+    url = "https://ims-na1.adobelogin.com/ims/token/v3"
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    data = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "grant_type": "client_credentials",
+        "scope": "openid,AdobeID,read_organizations"
+    }
+    res = requests.post(url, headers=headers, data=data, timeout=15)
+    res.raise_for_status()
+    return res.json().get("access_token")
+
+def convert_with_adobe_rest(pdf_bytes: bytes, client_id: str, client_secret: str) -> bytes:
+    """تحويل مستند PDF إلى Word عبر Adobe REST API الرسمي المباشر"""
+    token = get_adobe_access_token(client_id, client_secret)
+
+    # 1. طلب رابط رفع من Adobe
+    upload_url_req = "https://pdf-services.adobe.io/assets"
+    headers = {
+        "X-API-Key": client_id,
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    upload_res = requests.post(upload_url_req, headers=headers, json={"mediaType": "application/pdf"}, timeout=15)
+    upload_res.raise_for_status()
+    upload_data = upload_res.json()
+    upload_uri = upload_data["uploadUri"]
+    asset_id = upload_data["assetID"]
+
+    # 2. رفع ملف الـ PDF
+    put_res = requests.put(upload_uri, headers={"Content-Type": "application/pdf"}, data=pdf_bytes, timeout=30)
+    put_res.raise_for_status()
+
+    # 3. إرسال أمر التحويل إلى DOCX
+    job_url = "https://pdf-services.adobe.io/operation/exportpdf"
+    job_payload = {
+        "assetID": asset_id,
+        "targetFormat": "docx"
+    }
+    job_res = requests.post(job_url, headers=headers, json=job_payload, timeout=15)
+    job_res.raise_for_status()
+    poll_location = job_res.headers.get("Location")
+
+    # 4. انتظار انتهاء التحويل وتنزيل النتيجة
+    for _ in range(30):
+        time.sleep(2)
+        poll_res = requests.get(poll_location, headers=headers, timeout=15)
+        if poll_res.status_code == 200:
+            status = poll_res.json().get("status")
+            if status == "done":
+                download_uri = poll_res.json()["asset"]["downloadUri"]
+                final_res = requests.get(download_uri, timeout=30)
+                final_res.raise_for_status()
+                return final_res.content
+            elif status == "failed":
+                raise Exception("Adobe job returned failed status")
+
+    raise Exception("Adobe conversion timed out")
 
 @app.post("/convert")
 async def convert_pdf(file: UploadFile = File(...)):
@@ -59,47 +97,32 @@ async def convert_pdf(file: UploadFile = File(...)):
 
     try:
         content = await file.read()
-        with open(pdf_path, "wb") as f:
-            f.write(content)
+        converted = False
 
-        adobe_success = False
+        client_id = os.environ.get("PDF_SERVICES_CLIENT_ID")
+        client_secret = os.environ.get("PDF_SERVICES_CLIENT_SECRET")
 
-        # 1. محاولة التحويل عبر Adobe
-        try:
-            print("==> Trying Adobe PDF Services...")
-            pdf_services = get_adobe_services()
-            
-            with open(pdf_path, "rb") as input_file:
-                input_asset = pdf_services.upload(
-                    input_stream=input_file,
-                    mime_type=PDFServicesMediaType.PDF
-                )
+        # المحاولة عبر محرك Adobe الرسمي
+        if client_id and client_secret:
+            try:
+                print("==> Processing via Adobe REST API...")
+                docx_bytes = convert_with_adobe_rest(content, client_id.strip(), client_secret.strip())
+                with open(docx_path, "wb") as f:
+                    f.write(docx_bytes)
+                converted = True
+                print("==> Adobe conversion successful!")
+            except Exception as ad_err:
+                print(f"⚠️ Adobe REST failed: {ad_err}, switching to fallback...")
 
-            export_params = ExportPDFParams(target_format=ExportPDFTargetFormat.DOCX)
-            export_job = ExportPDFJob(input_asset=input_asset, export_pdf_params=export_params)
-            
-            location = pdf_services.submit(export_job)
-            # استخراج النتيجة دون الحاجة لكلاسات فرعية
-            pdf_services_response = pdf_services.get_job_result(location, None)
-            result_asset = pdf_services_response.get_result().get_asset()
-            stream_asset = pdf_services.get_content(result_asset)
-
-            with open(docx_path, "wb") as output_file:
-                output_file.write(stream_asset.get_data_bytes())
-                
-            print("==> Adobe conversion succeeded!")
-            adobe_success = True
-        except Exception as adobe_err:
-            print(f"⚠️ Adobe failed: {adobe_err}")
-            traceback.print_exc()
-
-        # 2. في حال فشل Adobe لأي سبب، يتم التحويل فوراً بالمحرك البديل
-        if not adobe_success or not os.path.exists(docx_path):
-            print("==> Falling back to native converter...")
+        # الخطة البديلة في حال تعذر Adobe
+        if not converted:
+            print("==> Processing via native fallback...")
+            with open(pdf_path, "wb") as f:
+                f.write(content)
             cv = Converter(pdf_path)
             cv.convert(docx_path, start=0, end=None)
             cv.close()
-            print("==> Native converter completed.")
+            print("==> Fallback completed.")
 
         return FileResponse(
             docx_path,
@@ -108,8 +131,7 @@ async def convert_pdf(file: UploadFile = File(...)):
         )
 
     except Exception as e:
-        print(f"❌ Error during conversion: {str(e)}")
-        traceback.print_exc()
+        print(f"❌ Conversion failed completely: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if os.path.exists(pdf_path):
