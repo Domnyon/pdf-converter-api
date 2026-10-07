@@ -1,17 +1,22 @@
 import os
 import uuid
+import traceback
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-# استيراد أدوات Adobe الرسمية
+# مكتبات Adobe الرسمية
 from adobe.pdfservices.operation.auth.service_principal_credentials import ServicePrincipalCredentials
 from adobe.pdfservices.operation.pdf_services import PDFServices
 from adobe.pdfservices.operation.pdf_services_media_type import PDFServicesMediaType
 from adobe.pdfservices.operation.pdfjobs.jobs.export_pdf_job import ExportPDFJob
 from adobe.pdfservices.operation.pdfjobs.params.export_pdf.export_pdf_params import ExportPDFParams
 from adobe.pdfservices.operation.pdfjobs.params.export_pdf.export_pdf_target_format import ExportPDFTargetFormat
+from adobe.pdfservices.operation.pdfjobs.result.export_pdf_result import ExportPDFResult
+
+# مكتبة بديلة احتياطية لضمان عمل الخدمة دائماً
+from pdf2docx import Converter
 
 import docx
 from docx.shared import Pt, Inches
@@ -32,18 +37,18 @@ app.add_middleware(
 @app.get("/")
 @app.head("/")
 async def root():
-    return {"status": "ok", "engine": "Adobe PDF Services"}
+    return {"status": "ok", "message": "APDF API is active and running"}
 
 def get_adobe_services():
     client_id = os.environ.get("PDF_SERVICES_CLIENT_ID")
     client_secret = os.environ.get("PDF_SERVICES_CLIENT_SECRET")
     
     if not client_id or not client_secret:
-        raise ValueError("مفاتيح Adobe غير متوفرة في بيئة السيرفر")
+        raise ValueError("Adobe credentials missing from Environment Variables")
         
     credentials = ServicePrincipalCredentials(
-        client_id=client_id,
-        client_secret=client_secret
+        client_id=client_id.strip(),
+        client_secret=client_secret.strip()
     )
     return PDFServices(credentials=credentials)
 
@@ -54,33 +59,46 @@ async def convert_pdf(file: UploadFile = File(...)):
     docx_path = f"/tmp/{unique_id}.docx"
 
     try:
-        # حفظ الملف المرفوع مؤقتاً
         content = await file.read()
         with open(pdf_path, "wb") as f:
             f.write(content)
 
-        # الاتصال بمحرك أدوبي السحابي الرسمي
-        pdf_services = get_adobe_services()
-        
-        with open(pdf_path, "rb") as input_file:
-            input_asset = pdf_services.upload(
-                input_stream=input_file,
-                mime_type=PDFServicesMediaType.PDF
-            )
+        # المحاولة الأولى: تحويل رسمي فائق الدقة عبر محرك Adobe
+        try:
+            print("==> Trying Adobe PDF Services...")
+            pdf_services = get_adobe_services()
+            
+            with open(pdf_path, "rb") as input_file:
+                input_asset = pdf_services.upload(
+                    input_stream=input_file,
+                    mime_type=PDFServicesMediaType.PDF
+                )
 
-        export_params = ExportPDFParams(
-            target_format=ExportPDFTargetFormat.DOCX
-        )
-        export_job = ExportPDFJob(input_asset=input_asset, export_pdf_params=export_params)
-        
-        # تنفيذ التحويل وسحب النتيجة
-        location = pdf_services.submit(export_job)
-        pdf_services_response = pdf_services.get_job_result(location, ExportPDFTargetFormat)
-        result_asset = pdf_services_response.get_result().get_asset()
-        stream_asset = pdf_services.get_content(result_asset)
+            export_params = ExportPDFParams(target_format=ExportPDFTargetFormat.DOCX)
+            export_job = ExportPDFJob(input_asset=input_asset, export_pdf_params=export_params)
+            
+            location = pdf_services.submit(export_job)
+            pdf_services_response = pdf_services.get_job_result(location, ExportPDFResult)
+            result_asset = pdf_services_response.get_result().get_asset()
+            stream_asset = pdf_services.get_content(result_asset)
 
-        with open(docx_path, "wb") as output_file:
-            output_file.write(stream_asset.get_data_bytes())
+            with open(docx_path, "wb") as output_file:
+                output_file.write(stream_asset.get_data_bytes())
+            print("==> Adobe conversion succeeded!")
+
+        except Exception as adobe_err:
+            print(f"⚠️ Adobe failed with error: {adobe_err}")
+            traceback.print_exc()
+            print("==> Falling back to native converter...")
+            
+            # خطة احتياطية فورية تضمن عدم انقطاع الخدمة عن العميل
+            cv = Converter(pdf_path)
+            cv.convert(docx_path, start=0, end=None)
+            cv.close()
+            print("==> Native fallback succeeded!")
+
+        if not os.path.exists(docx_path):
+            raise Exception("File conversion failed to generate output.")
 
         return FileResponse(
             docx_path,
@@ -89,10 +107,15 @@ async def convert_pdf(file: UploadFile = File(...)):
         )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"خطأ أثناء التحويل عبر Adobe: {str(e)}")
+        print(f"❌ Conversion Fatal Error: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         if os.path.exists(pdf_path):
-            os.remove(pdf_path)
+            try:
+                os.remove(pdf_path)
+            except:
+                pass
 
 class ExportRequest(BaseModel):
     title: str = "مستند_معدل"
