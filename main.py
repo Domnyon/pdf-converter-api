@@ -6,16 +6,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-# مكتبات Adobe الرسمية
+# استيراد محرك Adobe بالطريقة الرسمية والمضمونة
 from adobe.pdfservices.operation.auth.service_principal_credentials import ServicePrincipalCredentials
 from adobe.pdfservices.operation.pdf_services import PDFServices
 from adobe.pdfservices.operation.pdf_services_media_type import PDFServicesMediaType
 from adobe.pdfservices.operation.pdfjobs.jobs.export_pdf_job import ExportPDFJob
 from adobe.pdfservices.operation.pdfjobs.params.export_pdf.export_pdf_params import ExportPDFParams
 from adobe.pdfservices.operation.pdfjobs.params.export_pdf.export_pdf_target_format import ExportPDFTargetFormat
-from adobe.pdfservices.operation.pdfjobs.result.export_pdf_result import ExportPDFResult
 
-# مكتبة بديلة احتياطية لضمان عمل الخدمة دائماً
+# مكتبة المعالجة المحلية كخطة بديلة
 from pdf2docx import Converter
 
 import docx
@@ -37,14 +36,14 @@ app.add_middleware(
 @app.get("/")
 @app.head("/")
 async def root():
-    return {"status": "ok", "message": "APDF API is active and running"}
+    return {"status": "ok", "message": "APDF API is active"}
 
 def get_adobe_services():
     client_id = os.environ.get("PDF_SERVICES_CLIENT_ID")
     client_secret = os.environ.get("PDF_SERVICES_CLIENT_SECRET")
     
     if not client_id or not client_secret:
-        raise ValueError("Adobe credentials missing from Environment Variables")
+        raise ValueError("Missing Adobe credentials in Environment Variables")
         
     credentials = ServicePrincipalCredentials(
         client_id=client_id.strip(),
@@ -63,7 +62,9 @@ async def convert_pdf(file: UploadFile = File(...)):
         with open(pdf_path, "wb") as f:
             f.write(content)
 
-        # المحاولة الأولى: تحويل رسمي فائق الدقة عبر محرك Adobe
+        adobe_success = False
+
+        # 1. محاولة التحويل عبر Adobe
         try:
             print("==> Trying Adobe PDF Services...")
             pdf_services = get_adobe_services()
@@ -78,27 +79,27 @@ async def convert_pdf(file: UploadFile = File(...)):
             export_job = ExportPDFJob(input_asset=input_asset, export_pdf_params=export_params)
             
             location = pdf_services.submit(export_job)
-            pdf_services_response = pdf_services.get_job_result(location, ExportPDFResult)
+            # استخراج النتيجة دون الحاجة لكلاسات فرعية
+            pdf_services_response = pdf_services.get_job_result(location, None)
             result_asset = pdf_services_response.get_result().get_asset()
             stream_asset = pdf_services.get_content(result_asset)
 
             with open(docx_path, "wb") as output_file:
                 output_file.write(stream_asset.get_data_bytes())
+                
             print("==> Adobe conversion succeeded!")
-
+            adobe_success = True
         except Exception as adobe_err:
-            print(f"⚠️ Adobe failed with error: {adobe_err}")
+            print(f"⚠️ Adobe failed: {adobe_err}")
             traceback.print_exc()
+
+        # 2. في حال فشل Adobe لأي سبب، يتم التحويل فوراً بالمحرك البديل
+        if not adobe_success or not os.path.exists(docx_path):
             print("==> Falling back to native converter...")
-            
-            # خطة احتياطية فورية تضمن عدم انقطاع الخدمة عن العميل
             cv = Converter(pdf_path)
             cv.convert(docx_path, start=0, end=None)
             cv.close()
-            print("==> Native fallback succeeded!")
-
-        if not os.path.exists(docx_path):
-            raise Exception("File conversion failed to generate output.")
+            print("==> Native converter completed.")
 
         return FileResponse(
             docx_path,
@@ -107,7 +108,7 @@ async def convert_pdf(file: UploadFile = File(...)):
         )
 
     except Exception as e:
-        print(f"❌ Conversion Fatal Error: {str(e)}")
+        print(f"❌ Error during conversion: {str(e)}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
     finally:
